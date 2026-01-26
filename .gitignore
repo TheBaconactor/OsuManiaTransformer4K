@@ -1,0 +1,37 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs / envs
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Large datasets / generated artifacts
+Datasets/audio/
+Datasets/annotations/
+Datasets/osz_cache/
+
+Datasets2/audio/
+Datasets2/annotations/
+Datasets2/timing_points/
+
+osu2mir/audio/
+osu2mir/osz_cache/
+osu2mir/osu2beat2025_metered_beats/
+osu2mir/osu2beat2025_metered_beats.zip
+osu2mir/421_lbd.pdf
+
+reports/
+
+# Large model/test assets (download/build instead of committing)
+Modules/beat_this/beat_this/onnx_models/*.onnx
+Modules/beat_this/tests/*.mp3
