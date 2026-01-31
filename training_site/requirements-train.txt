@@ -1,0 +1,12 @@
+# Training extras (beyond minimal inference requirements)
+#
+# Notes:
+# - Install a PyTorch + torchaudio build appropriate for your environment (CPU/CUDA/ROCm) separately.
+# - `mir_eval` is optional (we made it optional in-code), but useful for beat metrics.
+pytorch-lightning>=2.2
+pandas>=2.0
+mir_eval>=0.7
+onnx>=1.14
+onnxruntime>=1.17
+soxr>=0.3.7
+

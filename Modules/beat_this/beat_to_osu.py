@@ -7,13 +7,335 @@ and converts them into osu! .osu format timing points.
 Usage:
     python beat_to_osu.py path/to/audio.mp3
     python beat_to_osu.py path/to/audio.mp3 --output timing_points.txt
+    python beat_to_osu.py path/to/audio.mp3 --timing-profile live --output timing_points.txt
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
+
+TIMING_PROFILES: dict[str, dict[str, object]] = {
+    # Metronomic / produced music: prefer a single BPM + offset.
+    "stable": {
+        "method": "gridfit",
+        "postprocess": "minimal",
+        "legacy_mode": "change",
+        "legacy_anchor_ms": 4000.0,
+        "legacy_anchor_alpha": 0.2,
+        "refine": False,
+        "logit_refine": False,
+        "onset_refine": False,
+    },
+    # Rubato / live recordings: prevent long-term drift by re-anchoring regularly.
+    "live": {
+        "method": "legacy",
+        "postprocess": "dbn",
+        "legacy_mode": "anchor",
+        "legacy_anchor_ms": 3000.0,
+        "legacy_anchor_alpha": 0.25,
+        "refine": True,
+        "logit_refine": False,
+        "onset_refine": False,
+    },
+    # Try to decide if gridfit is sufficient; otherwise resync.
+    "auto": {
+        "method": "auto",
+        "postprocess": "minimal",
+        "legacy_mode": "change",
+        "legacy_anchor_ms": 4000.0,
+        "legacy_anchor_alpha": 0.2,
+        "refine": False,
+        "logit_refine": False,
+        "onset_refine": False,
+    },
+}
+
+
+def _timing_profile_from_argv(argv: list[str]) -> str:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument(
+        "--timing-profile",
+        "--profile",
+        dest="timing_profile",
+        choices=sorted(TIMING_PROFILES.keys()),
+        default="stable",
+    )
+    args, _ = pre.parse_known_args(argv)
+    return str(args.timing_profile)
+
+
+def _defaults_for_timing_profile(profile: str) -> dict[str, object]:
+    if profile not in TIMING_PROFILES:
+        raise ValueError(
+            f"Unknown timing profile {profile!r}; expected one of {sorted(TIMING_PROFILES.keys())}"
+        )
+    return dict(TIMING_PROFILES[profile])
+
+
+def _gridfit_score_segment(
+    beat_prob: np.ndarray,
+    *,
+    offset_ms: float,
+    ms_per_beat: float,
+    seg_start_ms: float,
+    seg_end_ms: float,
+    fps: float,
+    min_gridlines: int = 8,
+) -> float:
+    """
+    Score a timing grid by how well its beat gridlines land on high beat probability.
+    Higher is better.
+    """
+    mpb = float(ms_per_beat)
+    if not np.isfinite(mpb) or mpb <= 0:
+        return -float("inf")
+    seg_start_ms = float(seg_start_ms)
+    seg_end_ms = float(seg_end_ms)
+    if not (np.isfinite(seg_start_ms) and np.isfinite(seg_end_ms)) or seg_end_ms <= seg_start_ms:
+        return -float("inf")
+
+    # Enumerate beat gridlines in this segment.
+    n0 = int(np.floor((seg_start_ms - float(offset_ms)) / mpb))
+    n1 = int(np.ceil((seg_end_ms - float(offset_ms)) / mpb))
+    n = np.arange(n0, n1 + 1, dtype=np.int64)
+    grid_ms = float(offset_ms) + n.astype(np.float64) * mpb
+    grid_ms = grid_ms[(grid_ms >= seg_start_ms) & (grid_ms < seg_end_ms)]
+    if grid_ms.size < int(min_gridlines):
+        return -float("inf")
+
+    p = _interp_prob(beat_prob, grid_ms, fps=float(fps))
+    return float(np.mean(p))
+
+
+def refine_timing_points_with_logits(
+    timing_points: list[dict],
+    beat_logits: np.ndarray,
+    *,
+    fps: float = 50.0,
+    offset_step_ms: float = 0.5,
+    offset_window_ms: float = 25.0,
+    mpb_search_pct: float = 0.01,
+    mpb_search_steps: int = 7,
+    min_gridlines: int = 8,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Audio-aware refinement: adjust each redline's phase (and slightly its tempo) to better
+    align beat gridlines to Beat This activations.
+
+    This is "unsupervised" (no hitobjects) and is mainly meant to reduce phase bias when
+    timing points are produced from noisy beat picks.
+    """
+    beat_logits = np.asarray(beat_logits, dtype=np.float64).reshape(-1)
+    beat_prob = _sigmoid(beat_logits)
+    if beat_prob.size < 8:
+        return timing_points, []
+
+    tps = [dict(tp) for tp in timing_points]
+    tps.sort(key=lambda tp: float(tp.get("offset_ms", 0.0)))
+
+    audio_end_ms = (float(beat_prob.size - 1) / float(fps)) * 1000.0
+    report: list[dict] = []
+
+    step = float(offset_step_ms)
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError("offset_step_ms must be > 0")
+
+    pct = float(max(0.0, mpb_search_pct))
+    n_steps = int(max(1, mpb_search_steps))
+    if n_steps == 1:
+        pct = 0.0
+
+    for i, tp in enumerate(tps):
+        base_offset = float(tp["offset_ms"])
+        base_mpb = float(tp["ms_per_beat"])
+        if not np.isfinite(base_offset) or not np.isfinite(base_mpb) or base_mpb <= 0:
+            report.append({"i": int(i), "refined": False, "reason": "invalid_base"})
+            continue
+
+        seg_start = max(0.0, base_offset)
+        seg_end = (
+            float(tps[i + 1]["offset_ms"]) if (i + 1) < len(tps) else float(audio_end_ms)
+        )
+        seg_end = min(float(audio_end_ms), float(seg_end))
+        if seg_end <= seg_start:
+            report.append({"i": int(i), "refined": False, "reason": "empty_segment"})
+            continue
+
+        # Keep ordering stable.
+        min_offset = float(tps[i - 1]["offset_ms"]) + 1e-3 if i > 0 else -float("inf")
+        max_offset = float(seg_end) - 1e-3
+
+        win = float(offset_window_ms)
+        if not np.isfinite(win) or win <= 0:
+            win = 0.0
+        win = min(win, 0.49 * float(base_mpb))
+        offsets = np.arange(base_offset - win, base_offset + win + step, step, dtype=np.float64)
+        offsets = np.clip(offsets, min_offset, max_offset)
+        offsets = np.unique(offsets)
+
+        if pct > 0.0:
+            factors = np.linspace(1.0 - pct, 1.0 + pct, n_steps, dtype=np.float64)
+            mpb_candidates = base_mpb * factors
+        else:
+            mpb_candidates = np.asarray([base_mpb], dtype=np.float64)
+
+        best_score = -float("inf")
+        best_offset = base_offset
+        best_mpb = base_mpb
+
+        base_score = _gridfit_score_segment(
+            beat_prob,
+            offset_ms=base_offset,
+            ms_per_beat=base_mpb,
+            seg_start_ms=seg_start,
+            seg_end_ms=seg_end,
+            fps=float(fps),
+            min_gridlines=int(min_gridlines),
+        )
+
+        for mpb in mpb_candidates:
+            mpb = float(mpb)
+            if not np.isfinite(mpb) or mpb <= 0:
+                continue
+            for off in offsets:
+                score = _gridfit_score_segment(
+                    beat_prob,
+                    offset_ms=float(off),
+                    ms_per_beat=float(mpb),
+                    seg_start_ms=seg_start,
+                    seg_end_ms=seg_end,
+                    fps=float(fps),
+                    min_gridlines=int(min_gridlines),
+                )
+                if score > best_score:
+                    best_score = float(score)
+                    best_offset = float(off)
+                    best_mpb = float(mpb)
+
+        # If we couldn't score this segment (too short), keep as-is.
+        if not np.isfinite(best_score):
+            report.append({"i": int(i), "refined": False, "reason": "no_score"})
+            continue
+
+        tp["offset_ms"] = float(best_offset)
+        tp["ms_per_beat"] = round(float(best_mpb), 6)
+
+        report.append(
+            {
+                "i": int(i),
+                "refined": True,
+                "offset_ms_before": float(base_offset),
+                "offset_ms_after": float(best_offset),
+                "mpb_before": float(base_mpb),
+                "mpb_after": float(best_mpb),
+                "score_before": float(base_score),
+                "score_after": float(best_score),
+            }
+        )
+
+    # Ensure monotonic offsets after float updates; if collisions happen, keep first.
+    tps.sort(key=lambda tp: float(tp.get("offset_ms", 0.0)))
+    dedup: list[dict] = []
+    seen = set()
+    for tp in tps:
+        off_ms = float(tp["offset_ms"])
+        key = int(round(off_ms * 1000.0))
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(tp)
+
+    return dedup, report
+
+
+def detect_audio_onsets_ms(
+    audio_path: str,
+    *,
+    n_fft: int = 512,
+    hop_length: int = 128,
+    peak_width_frames: int = 3,
+    peak_percentile: float = 0.90,
+    min_separation_ms: float = 50.0,
+    max_onsets: int | None = 6000,
+) -> np.ndarray:
+    """
+    Lightweight, dependency-free onset detector (spectral flux peak picking).
+
+    Returns onset timestamps in milliseconds (float64), sorted ascending.
+    """
+    from beat_this.preprocessing import load_audio
+
+    signal, sr = load_audio(str(audio_path))
+    x = np.asarray(signal, dtype=np.float32).reshape(-1)
+    if x.size < int(n_fft):
+        return np.asarray([], dtype=np.float64)
+
+    n_fft = int(n_fft)
+    hop_length = int(hop_length)
+    if n_fft <= 0 or hop_length <= 0:
+        return np.asarray([], dtype=np.float64)
+
+    n_frames = 1 + (x.size - n_fft) // hop_length
+    if n_frames <= 1:
+        return np.asarray([], dtype=np.float64)
+
+    # Frame as a strided view to avoid copies.
+    stride = x.strides[0]
+    frames = np.lib.stride_tricks.as_strided(
+        x,
+        shape=(n_frames, n_fft),
+        strides=(hop_length * stride, stride),
+        writeable=False,
+    )
+    window = np.hanning(n_fft).astype(np.float32)
+    frames_w = frames * window[None, :]
+
+    spec = np.fft.rfft(frames_w, axis=1)
+    mag = np.abs(spec).astype(np.float32)
+
+    # Spectral flux (positive differences).
+    diff = mag[1:] - mag[:-1]
+    diff = np.maximum(diff, 0.0)
+    flux = diff.sum(axis=1).astype(np.float32)
+    flux = np.concatenate([np.asarray([0.0], dtype=np.float32), flux])
+
+    # Normalize to [0, 1] (avoid all-zero).
+    flux = flux - float(np.min(flux))
+    mx = float(np.max(flux))
+    if mx > 0:
+        flux = flux / mx
+
+    width = max(1, int(peak_width_frames))
+    mask = _local_maxima_mask(flux, width=width)
+    if not np.any(mask):
+        return np.asarray([], dtype=np.float64)
+
+    q = float(np.clip(float(peak_percentile), 0.0, 1.0))
+    thresh = float(np.quantile(flux, q))
+    peaks = np.where(mask & (flux >= thresh))[0]
+    if peaks.size == 0:
+        return np.asarray([], dtype=np.float64)
+
+    # Enforce a minimum time separation between peaks.
+    min_sep_frames = int(round((float(min_separation_ms) / 1000.0) * float(sr) / float(hop_length)))
+    min_sep_frames = max(1, min_sep_frames)
+    kept: list[int] = []
+    last = -10**12
+    for idx in peaks.tolist():
+        if idx - last >= min_sep_frames:
+            kept.append(int(idx))
+            last = int(idx)
+
+    # Optional cap: keep strongest peaks.
+    if max_onsets is not None and len(kept) > int(max_onsets):
+        order = sorted(kept, key=lambda i: float(flux[i]), reverse=True)[: int(max_onsets)]
+        kept = sorted(order)
+
+    times_ms = (np.asarray(kept, dtype=np.float64) * float(hop_length) / float(sr)) * 1000.0
+    return times_ms
 
 
 def get_device(requested: str) -> str:
@@ -64,6 +386,263 @@ def _interp_prob(prob: np.ndarray, t_ms: np.ndarray, fps: float) -> np.ndarray:
     i1 = np.clip(i0 + 1, 0, len(prob) - 1)
     return (1.0 - frac) * prob[i0] + frac * prob[i1]
 
+
+def _quadratic_refine_frames(prob: np.ndarray, frames: np.ndarray) -> np.ndarray:
+    """
+    Sub-frame quadratic peak interpolation around *given* frame indices.
+
+    This is a safe refinement for beat trackers that output frame indices (e.g. our viterbi),
+    because it can't jump to a different peak—only adds a small delta in [-0.5, 0.5] frames.
+    """
+    p = np.asarray(prob, dtype=np.float64).reshape(-1)
+    f0 = np.asarray(frames, dtype=np.int64).reshape(-1)
+    if p.size < 3 or f0.size == 0:
+        return f0.astype(np.float64)
+
+    f = np.clip(f0, 1, int(p.size - 2))
+    y0 = p[f - 1]
+    y1 = p[f]
+    y2 = p[f + 1]
+    denom = (y0 - 2.0 * y1 + y2)
+    delta = np.zeros_like(y1, dtype=np.float64)
+    m = denom != 0.0
+    delta[m] = 0.5 * (y0[m] - y2[m]) / denom[m]
+    delta = np.clip(delta, -0.5, 0.5)
+    return f.astype(np.float64) + delta
+
+
+def _load_hit_objects_ms(annotation_json_path: str) -> np.ndarray:
+    ann = json.loads(Path(annotation_json_path).read_text(encoding="utf-8"))
+    hit_objects = ann.get("hit_objects", [])
+    times = []
+    for ho in hit_objects:
+        try:
+            times.append(float(ho["time"]))
+        except Exception:
+            continue
+    times.sort()
+    return np.asarray(times, dtype=np.float64)
+
+
+def _snapping_error_for_offsets(
+    hit_times_ms: np.ndarray,
+    offsets_ms: np.ndarray,
+    *,
+    ms_per_beat: float,
+    divisors: tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16),
+) -> np.ndarray:
+    """
+    Compute mean snapping error for each candidate offset (ms).
+
+    For each hit object, we allow snapping to multiple common divisors and take the minimum error.
+    """
+    hit_times_ms = np.asarray(hit_times_ms, dtype=np.float64).reshape(1, -1)
+    offsets_ms = np.asarray(offsets_ms, dtype=np.float64).reshape(-1, 1)
+    mpb = float(ms_per_beat)
+    if hit_times_ms.size == 0 or offsets_ms.size == 0 or not np.isfinite(mpb) or mpb <= 0:
+        return np.asarray([], dtype=np.float64)
+
+    best = np.full((offsets_ms.shape[0], hit_times_ms.shape[1]), np.inf, dtype=np.float64)
+    for div in divisors:
+        step = mpb / float(div)
+        if not np.isfinite(step) or step <= 0:
+            continue
+        dt = hit_times_ms - offsets_ms
+        k = np.round(dt / step)
+        snapped = offsets_ms + k * step
+        err = np.abs(hit_times_ms - snapped)
+        best = np.minimum(best, err)
+
+    return np.mean(best, axis=1)
+
+
+def refine_timing_points_with_hitobjects(
+    timing_points: list[dict],
+    hit_times_ms: np.ndarray,
+    *,
+    offset_step_ms: float = 1.0,
+    max_offset_shift_ms: float | None = None,
+    mpb_search_pct: float = 0.0,
+    mpb_search_steps: int = 5,
+    objective: str = "mean",
+    min_hits_per_section: int = 8,
+    divisors: tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 16),
+) -> tuple[list[dict], list[dict]]:
+    """
+    Note-aware refinement: adjust each redline's phase (and optionally tempo) to better quantize note times.
+
+    This mimics what human mappers actually optimize: clean snapping of hit objects to simple subdivisions.
+
+    Returns (refined_timing_points, per_section_report).
+    """
+    hit_times_ms = np.asarray(hit_times_ms, dtype=np.float64).reshape(-1)
+    hit_times_ms = hit_times_ms[np.isfinite(hit_times_ms)]
+    hit_times_ms.sort()
+
+    if hit_times_ms.size == 0 or len(timing_points) == 0:
+        return timing_points, []
+
+    tps = [dict(tp) for tp in timing_points]
+    tps.sort(key=lambda tp: float(tp.get("offset_ms", 0.0)))
+
+    if objective not in {"mean"}:
+        raise ValueError(f"objective must be 'mean' for now, got {objective!r}")
+
+    step = float(offset_step_ms)
+    if not np.isfinite(step) or step <= 0:
+        raise ValueError("offset_step_ms must be > 0")
+
+    if int(mpb_search_steps) < 1:
+        raise ValueError("mpb_search_steps must be >= 1")
+    if int(mpb_search_steps) == 1:
+        mpb_search_pct = 0.0
+
+    report: list[dict] = []
+    last_hit = float(hit_times_ms[-1])
+
+    for i, tp in enumerate(tps):
+        base_offset = float(tp["offset_ms"])
+        base_mpb = float(tp["ms_per_beat"])
+        seg_start = base_offset
+        seg_end = float(tps[i + 1]["offset_ms"]) if (i + 1) < len(tps) else (last_hit + 2000.0)
+
+        # Keep ordering stable.
+        min_offset = float(tps[i - 1]["offset_ms"]) + 1.0 if i > 0 else -float("inf")
+        max_offset = seg_end - 1.0
+
+        hits = hit_times_ms[(hit_times_ms >= seg_start) & (hit_times_ms < seg_end)]
+        if hits.size < int(min_hits_per_section) or not np.isfinite(base_mpb) or base_mpb <= 0:
+            report.append(
+                {
+                    "i": int(i),
+                    "refined": False,
+                    "hits": int(hits.size),
+                    "offset_ms_before": float(tp["offset_ms"]),
+                    "mpb_before": float(tp["ms_per_beat"]),
+                }
+            )
+            continue
+
+        # Build MPB candidates around the current estimate.
+        pct = float(max(0.0, mpb_search_pct))
+        if pct > 0:
+            factors = np.linspace(1.0 - pct, 1.0 + pct, int(mpb_search_steps), dtype=np.float64)
+            mpb_candidates = base_mpb * factors
+        else:
+            mpb_candidates = np.asarray([base_mpb], dtype=np.float64)
+
+        best_cost = float("inf")
+        best_offset = base_offset
+        best_mpb = base_mpb
+
+        for mpb in mpb_candidates:
+            if not np.isfinite(mpb) or mpb <= 0:
+                continue
+            half = float(mpb) * 0.5
+            if max_offset_shift_ms is not None:
+                m = float(max_offset_shift_ms)
+                if np.isfinite(m) and m > 0:
+                    half = min(half, m)
+            deltas = np.arange(-half, half + step, step, dtype=np.float64)
+            offsets = base_offset + deltas
+            offsets = np.clip(offsets, min_offset, max_offset)
+            # De-duplicate after clipping.
+            offsets = np.unique(offsets)
+            costs = _snapping_error_for_offsets(hits, offsets, ms_per_beat=float(mpb), divisors=divisors)
+            if costs.size == 0:
+                continue
+            j = int(np.argmin(costs))
+            cost = float(costs[j])
+            if cost < best_cost:
+                best_cost = cost
+                best_offset = float(offsets[j])
+                best_mpb = float(mpb)
+
+        tps[i]["offset_ms"] = round(best_offset)
+        tps[i]["ms_per_beat"] = round(best_mpb, 6)
+
+        report.append(
+            {
+                "i": int(i),
+                "refined": True,
+                "hits": int(hits.size),
+                "cost_mean_ms": float(best_cost),
+                "offset_ms_before": float(base_offset),
+                "offset_ms_after": float(tps[i]["offset_ms"]),
+                "mpb_before": float(base_mpb),
+                "mpb_after": float(tps[i]["ms_per_beat"]),
+            }
+        )
+
+    # Ensure monotonic offsets after rounding; if collisions happen, keep first.
+    tps.sort(key=lambda tp: float(tp.get("offset_ms", 0.0)))
+    dedup: list[dict] = []
+    seen = set()
+    for tp in tps:
+        off = int(tp["offset_ms"])
+        if off in seen:
+            continue
+        seen.add(off)
+        dedup.append(tp)
+
+    return dedup, report
+
+
+def dump_debug_bundle(
+    dump_dir: Path,
+    *,
+    audio_path: str,
+    fps: int,
+    beat_times_s: np.ndarray,
+    downbeat_times_s: np.ndarray,
+    beat_logits: np.ndarray,
+    downbeat_logits: np.ndarray,
+    timing_points: list[dict],
+    meta: dict,
+    dump_spectrogram: bool = False,
+) -> None:
+    dump_dir.mkdir(parents=True, exist_ok=True)
+
+    beat_logits = np.asarray(beat_logits, dtype=np.float32).reshape(-1)
+    downbeat_logits = np.asarray(downbeat_logits, dtype=np.float32).reshape(-1)
+    beat_prob = _sigmoid(beat_logits.astype(np.float64)).astype(np.float32)
+    downbeat_prob = _sigmoid(downbeat_logits.astype(np.float64)).astype(np.float32)
+
+    np.savez_compressed(
+        dump_dir / "frames.npz",
+        fps=np.asarray([int(fps)], dtype=np.int32),
+        beat_logits=beat_logits,
+        downbeat_logits=downbeat_logits,
+        beat_prob=beat_prob,
+        downbeat_prob=downbeat_prob,
+    )
+
+    np.save(dump_dir / "beats_s.npy", np.asarray(beat_times_s, dtype=np.float64))
+    np.save(dump_dir / "downbeats_s.npy", np.asarray(downbeat_times_s, dtype=np.float64))
+
+    bundle = {
+        "audio_path": str(audio_path),
+        "fps": int(fps),
+        "meta": meta,
+        "timing_points": timing_points,
+    }
+    (dump_dir / "bundle.json").write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+
+    if dump_spectrogram:
+        try:
+            import torch
+            import soxr
+            from beat_this.preprocessing import LogMelSpect, load_audio
+
+            signal, sr = load_audio(audio_path, dtype="float64")
+            if sr != 22050:
+                signal = soxr.resample(signal, in_rate=sr, out_rate=22050)
+                sr = 22050
+            x = torch.tensor(signal, dtype=torch.float32, device="cpu")
+            mel = LogMelSpect(device="cpu")(x).detach().cpu().numpy().astype(np.float16)
+            np.save(dump_dir / "logmel_f128xT.npy", mel)
+        except Exception as e:
+            (dump_dir / "spectrogram_error.txt").write_text(f"{type(e).__name__}: {e}\n", encoding="utf-8")
 
 def _local_maxima_mask(x: np.ndarray, width: int) -> np.ndarray:
     """
@@ -614,6 +1193,7 @@ def get_frames_and_beats(
     device: str = "cpu",
     refine: bool = False,
     postprocess: str = "minimal",
+    checkpoint_path: str = "final0",
     viterbi_min_bpm: float = 55.0,
     viterbi_max_bpm: float = 215.0,
     viterbi_transition_lambda: float = 100.0,
@@ -636,17 +1216,32 @@ def get_frames_and_beats(
     if str(resolved_device).startswith("privateuseone"):
         from beat_this.onnx_inference import OnnxAudio2Frames
 
-        a2f = OnnxAudio2Frames(
-            checkpoint_path="final0",
-            provider="DmlExecutionProvider",
-            float16=False,
-        )
-        beat_logits_t, downbeat_logits_t = a2f(signal, sr)
+        try:
+            a2f = OnnxAudio2Frames(
+                checkpoint_path=str(checkpoint_path),
+                provider="DmlExecutionProvider",
+                float16=False,
+            )
+            beat_logits_t, downbeat_logits_t = a2f(signal, sr)
+        except Exception as e:
+            print(
+                f"[WARN] ONNX DirectML failed ({type(e).__name__}: {e}). Falling back to CPU.",
+                file=sys.stderr,
+            )
+            resolved_device = "cpu"
+            from beat_this.inference import Audio2Frames
+
+            a2f = Audio2Frames(
+                checkpoint_path=str(checkpoint_path),
+                device=resolved_device,
+                float16=False,
+            )
+            beat_logits_t, downbeat_logits_t = a2f(signal, sr)
     else:
         from beat_this.inference import Audio2Frames
 
         a2f = Audio2Frames(
-            checkpoint_path="final0",
+            checkpoint_path=str(checkpoint_path),
             device=resolved_device,
             float16=False,
         )
@@ -654,6 +1249,8 @@ def get_frames_and_beats(
 
     if postprocess not in {"minimal", "dbn", "viterbi"}:
         raise ValueError(f"Unknown postprocess={postprocess!r}")
+
+    did_refine = False
 
     if postprocess == "viterbi":
         beat_prob = _sigmoid(beat_logits_t.detach().cpu().numpy().reshape(-1))
@@ -672,7 +1269,11 @@ def get_frames_and_beats(
             downbeat_prob=downbeat_prob,
             meter=int(meter_for_downbeats),
         )
-        beat_time = beat_frames.astype(np.float64) / 50.0
+        beat_frames_f = beat_frames.astype(np.float64)
+        if refine:
+            beat_frames_f = _quadratic_refine_frames(beat_prob, beat_frames)
+            did_refine = True
+        beat_time = beat_frames_f / 50.0
         downbeat_time = downbeat_frames.astype(np.float64) / 50.0
     else:
         try:
@@ -699,7 +1300,11 @@ def get_frames_and_beats(
                     downbeat_prob=downbeat_prob,
                     meter=int(meter_for_downbeats),
                 )
-                beat_time = beat_frames.astype(np.float64) / 50.0
+                beat_frames_f = beat_frames.astype(np.float64)
+                if refine:
+                    beat_frames_f = _quadratic_refine_frames(beat_prob, beat_frames)
+                    did_refine = True
+                beat_time = beat_frames_f / 50.0
                 downbeat_time = downbeat_frames.astype(np.float64) / 50.0
             else:
                 raise
@@ -707,17 +1312,17 @@ def get_frames_and_beats(
             beat_time, downbeat_time = post(beat_logits_t, downbeat_logits_t)
 
     if refine:
-        # Refinement only applies to peak-picked beats.
-        if postprocess == "minimal":
+        # Sub-frame refinement via quadratic interpolation on the activation curve.
+        if not did_refine:
             beat_time = _refine_peak_times(beat_logits_t, beat_time, fps=50)
-            if len(downbeat_time) > 0 and len(beat_time) > 0:
-                beat_time_np = np.asarray(beat_time, dtype=np.float64)
-                downbeat_time_np = np.asarray(downbeat_time, dtype=np.float64)
-                down_ref = np.empty_like(downbeat_time_np)
-                for i, dt in enumerate(downbeat_time_np):
-                    j = int(np.argmin(np.abs(beat_time_np - dt)))
-                    down_ref[i] = beat_time_np[j]
-                downbeat_time = np.unique(down_ref)
+        if len(downbeat_time) > 0 and len(beat_time) > 0:
+            beat_time_np = np.asarray(beat_time, dtype=np.float64)
+            downbeat_time_np = np.asarray(downbeat_time, dtype=np.float64)
+            down_ref = np.empty_like(downbeat_time_np)
+            for i, dt in enumerate(downbeat_time_np):
+                j = int(np.argmin(np.abs(beat_time_np - dt)))
+                down_ref[i] = beat_time_np[j]
+            downbeat_time = np.unique(down_ref)
 
     beat_logits = beat_logits_t.detach().cpu().numpy().reshape(-1)
     downbeat_logits = downbeat_logits_t.detach().cpu().numpy().reshape(-1)
@@ -730,7 +1335,11 @@ def get_frames_and_beats(
 
 
 def get_beats(
-    audio_path: str, device: str = "cpu", refine: bool = False, dbn: bool = False
+    audio_path: str,
+    device: str = "cpu",
+    refine: bool = False,
+    dbn: bool = False,
+    checkpoint_path: str = "final0",
 ) -> tuple[list[float], list[float]]:
     """
     Run Beat This! inference on an audio file.
@@ -748,7 +1357,7 @@ def get_beats(
     if str(resolved_device).startswith("privateuseone"):
         try:
             file2beats = OnnxFile2Beats(
-                checkpoint_path="final0",
+                checkpoint_path=str(checkpoint_path),
                 provider="DmlExecutionProvider",
                 dbn=bool(dbn),
                 refine=refine,
@@ -764,7 +1373,7 @@ def get_beats(
     # Default: PyTorch inference (CPU / CUDA).
     try:
         file2beats = File2Beats(
-            checkpoint_path="final0",
+            checkpoint_path=str(checkpoint_path),
             device=resolved_device,
             dbn=bool(dbn),
             refine=refine,
@@ -776,7 +1385,7 @@ def get_beats(
                 file=sys.stderr,
             )
             file2beats = File2Beats(
-                checkpoint_path="final0",
+                checkpoint_path=str(checkpoint_path),
                 device=resolved_device,
                 dbn=False,
                 refine=refine,
@@ -1027,8 +1636,26 @@ def format_osu_timing_points(timing_points: list[dict]) -> str:
 
 
 def main():
+    timing_profile = _timing_profile_from_argv(sys.argv[1:])
+    defaults = _defaults_for_timing_profile(timing_profile)
+
+    class _HelpFormatter(
+        argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter
+    ):
+        pass
+
     parser = argparse.ArgumentParser(
-        description="Convert audio to osu! timing points using Beat This! AI"
+        description="Convert audio to osu! timing points using Beat This! AI",
+        formatter_class=_HelpFormatter,
+        epilog=(
+            "Timing profiles (recommended):\n"
+            "  stable: metronomic / produced music (minimal redlines)\n"
+            "  live:   live / rubato recordings (adds frequent resync redlines)\n"
+            "  auto:   decide per-audio (gridfit vs resync)\n\n"
+            "Examples:\n"
+            "  python beat_to_osu.py song.mp3 -o timing_points.txt\n"
+            "  python beat_to_osu.py song.mp3 --timing-profile live -o timing_points.txt\n"
+        ),
     )
     parser.add_argument("audio_path", type=str, help="Path to the audio file")
     parser.add_argument(
@@ -1036,8 +1663,37 @@ def main():
         help="Output file path (default: print to stdout)"
     )
     parser.add_argument(
+        "--timing-profile",
+        "--profile",
+        dest="timing_profile",
+        type=str,
+        default=timing_profile,
+        choices=sorted(TIMING_PROFILES.keys()),
+        help="High-level preset for timing-point behavior. Advanced flags override these defaults.",
+    )
+    parser.add_argument(
+        "--logit-refine",
+        action=argparse.BooleanOptionalAction,
+        default=bool(defaults.get("logit_refine", False)),
+        help="Refine timing points by aligning each section to Beat This activations.",
+    )
+    parser.add_argument(
+        "--onset-refine",
+        action=argparse.BooleanOptionalAction,
+        default=bool(defaults.get("onset_refine", False)),
+        help="Refine timing points by aligning to audio onsets (spectral flux).",
+    )
+    parser.add_argument(
         "--device", type=str, default="cpu",
         help="Device to run inference on (cpu, cuda, cuda:0, etc.)"
+    )
+    parser.add_argument(
+        "--beat-this-checkpoint",
+        "--checkpoint",
+        dest="beat_this_checkpoint",
+        type=str,
+        default="final0",
+        help="Beat This checkpoint shortname or path (e.g. final0, small0, or a local .ckpt).",
     )
     parser.add_argument(
         "--tolerance", type=float, default=2.0,
@@ -1052,7 +1708,7 @@ def main():
     parser.add_argument(
         "--legacy-mode",
         type=str,
-        default="change",
+        default=str(defaults.get("legacy_mode", "change")),
         choices=["change", "anchor"],
         help="Legacy mode: change-based segmentation vs anchor resync (default: %(default)s).",
     )
@@ -1071,13 +1727,13 @@ def main():
     parser.add_argument(
         "--legacy-anchor-ms",
         type=float,
-        default=4000.0,
+        default=float(defaults.get("legacy_anchor_ms", 4000.0)),
         help="Legacy anchor mode: resync interval in ms (default: %(default)s).",
     )
     parser.add_argument(
         "--legacy-anchor-alpha",
         type=float,
-        default=0.2,
+        default=float(defaults.get("legacy_anchor_alpha", 0.2)),
         help="Legacy anchor mode: local tempo adaptation alpha (default: %(default)s).",
     )
     parser.add_argument(
@@ -1087,13 +1743,14 @@ def main():
     )
     parser.add_argument(
         "--refine",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=bool(defaults.get("refine", False)),
         help="Refine beat times with sub-frame quadratic peak interpolation.",
     )
     parser.add_argument(
         "--postprocess",
         type=str,
-        default="minimal",
+        default=str(defaults.get("postprocess", "minimal")),
         choices=["minimal", "viterbi", "dbn"],
         help="Beat postprocessing backend (default: %(default)s).",
     )
@@ -1136,7 +1793,7 @@ def main():
     parser.add_argument(
         "--method",
         type=str,
-        default="gridfit",
+        default=str(defaults.get("method", "gridfit")),
         choices=["gridfit", "legacy", "elastic", "auto"],
         help="Timing point inference method (default: %(default)s).",
     )
@@ -1164,6 +1821,50 @@ def main():
         default="gridfit",
         choices=["gridfit", "legacy"],
         help="Auto mode: method to use when residual is between pass/fail.",
+    )
+    parser.add_argument(
+        "--hitobjects-json",
+        type=str,
+        default=None,
+        help=(
+            "Optional: path to a Datasets2 annotation JSON (or similar) containing hit_objects[]. "
+            "When provided, timing points are refined to better quantize these note times."
+        ),
+    )
+    parser.add_argument(
+        "--intent-offset-step-ms",
+        type=float,
+        default=1.0,
+        help="Note-aware refinement: offset search step in ms (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--intent-mpb-search-pct",
+        type=float,
+        default=0.01,
+        help="Note-aware refinement: search +/- pct around each section's ms_per_beat (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--intent-mpb-search-steps",
+        type=int,
+        default=7,
+        help="Note-aware refinement: number of ms_per_beat candidates (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--intent-min-hits",
+        type=int,
+        default=8,
+        help="Note-aware refinement: minimum hit objects per section to refine (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--dump-dir",
+        type=str,
+        default=None,
+        help="Optional: write a debug bundle (raw logits, beats, metadata) to this directory.",
+    )
+    parser.add_argument(
+        "--dump-spectrogram",
+        action="store_true",
+        help="Include a log-mel spectrogram in the debug bundle (can be large).",
     )
     parser.add_argument(
         "--elastic-min-section-beats",
@@ -1234,11 +1935,12 @@ def main():
         print("[INFO] minimal: enabling --refine for better BPM/offset", file=sys.stderr)
         refine_effective = True
 
-    beat_times, downbeat_times, beat_logits, _downbeat_logits = get_frames_and_beats(
+    beat_times, downbeat_times, beat_logits, downbeat_logits = get_frames_and_beats(
         str(audio_path),
         device=args.device,
         refine=refine_effective,
         postprocess=str(args.postprocess),
+        checkpoint_path=str(args.beat_this_checkpoint),
         viterbi_min_bpm=float(args.viterbi_min_bpm),
         viterbi_max_bpm=float(args.viterbi_max_bpm),
         viterbi_transition_lambda=float(args.viterbi_transition_lambda),
@@ -1393,8 +2095,83 @@ def main():
                     "meter": meter,
                 }
             ]
+
+    per_section_logit_refine = None
+    if bool(args.logit_refine) and len(timing_points) > 0:
+        before_n = len(timing_points)
+        timing_points, per_section_logit_refine = refine_timing_points_with_logits(
+            timing_points,
+            beat_logits=np.asarray(beat_logits, dtype=np.float64),
+            fps=50.0,
+        )
+        print(
+            f"[INFO] logit_refine: refined timing points using activations ({before_n} -> {len(timing_points)})",
+            file=sys.stderr,
+        )
+
+    per_section_onset_refine = None
+    if bool(args.onset_refine) and len(timing_points) > 0:
+        onset_ms = detect_audio_onsets_ms(str(audio_path))
+        if onset_ms.size:
+            before_n = len(timing_points)
+            timing_points, per_section_onset_refine = refine_timing_points_with_hitobjects(
+                timing_points,
+                onset_ms,
+                offset_step_ms=1.0,
+                max_offset_shift_ms=25.0,
+                mpb_search_pct=0.01,
+                mpb_search_steps=7,
+                min_hits_per_section=32,
+            )
+            print(
+                f"[INFO] onset_refine: refined timing points using {int(onset_ms.size)} onsets ({before_n} -> {len(timing_points)})",
+                file=sys.stderr,
+            )
+    per_section_intent = None
+    if args.hitobjects_json:
+        hit_times_ms = _load_hit_objects_ms(str(args.hitobjects_json))
+        before_n = len(timing_points)
+        timing_points, per_section_intent = refine_timing_points_with_hitobjects(
+            timing_points,
+            hit_times_ms,
+            offset_step_ms=float(args.intent_offset_step_ms),
+            mpb_search_pct=float(args.intent_mpb_search_pct),
+            mpb_search_steps=int(args.intent_mpb_search_steps),
+            min_hits_per_section=int(args.intent_min_hits),
+        )
+        print(
+            f"[INFO] intent: refined timing points using hitobjects ({before_n} -> {len(timing_points)})",
+            file=sys.stderr,
+        )
+
     print(f"[INFO] Generated {len(timing_points)} timing points", file=sys.stderr)
     
+    if args.dump_dir:
+        dump_meta = {
+            "args": vars(args),
+            "selected_method": selected_method,
+            "auto_residual_mean_ms": residual_mean_ms if args.method == "auto" else None,
+            "auto_residual_median_ms": residual_median_ms if args.method == "auto" else None,
+            "auto_residual_p95_ms": residual_p95_ms if args.method == "auto" else None,
+            "auto_residual_max_ms": residual_max_ms if args.method == "auto" else None,
+            "logit_refine_sections": per_section_logit_refine,
+            "onset_refine_sections": per_section_onset_refine,
+            "intent_sections": per_section_intent,
+        }
+        dump_debug_bundle(
+            Path(str(args.dump_dir)),
+            audio_path=audio_path,
+            fps=50,
+            beat_times_s=np.asarray(beat_times, dtype=np.float64),
+            downbeat_times_s=np.asarray(downbeat_times, dtype=np.float64),
+            beat_logits=np.asarray(beat_logits, dtype=np.float64),
+            downbeat_logits=np.asarray(downbeat_logits, dtype=np.float64),
+            timing_points=timing_points,
+            meta=dump_meta,
+            dump_spectrogram=bool(args.dump_spectrogram),
+        )
+        print(f"[INFO] Wrote debug bundle to: {args.dump_dir}", file=sys.stderr)
+
     # Format output
     output_text = format_osu_timing_points(timing_points)
     

@@ -1,4 +1,6 @@
 import inspect
+import pathlib
+import pickle
 
 import numpy as np
 import soxr
@@ -144,12 +146,31 @@ def load_checkpoint(checkpoint_path: str, device: str | torch.device = "cpu") ->
     """
     try:
         # try interpreting as local file name
-        weights_only = {'weights_only': True} if torch.__version__ >= "2" else {}
-        return torch.load(
-            checkpoint_path,
-            map_location=_checkpoint_map_location(device),
-            **weights_only,
-        )
+        weights_only: dict[str, object] = {}
+        if "weights_only" in inspect.signature(torch.load).parameters:
+            weights_only["weights_only"] = True
+        try:
+            return torch.load(
+                checkpoint_path,
+                map_location=_checkpoint_map_location(device),
+                **weights_only,
+            )
+        except pickle.UnpicklingError:
+            # PyTorch "weights_only" loader is restrictive; some Lightning
+            # checkpoints include pathlib objects in metadata/hparams.
+            if weights_only.get("weights_only"):
+                try:
+                    torch.serialization.add_safe_globals(
+                        [pathlib.PosixPath, pathlib.WindowsPath]
+                    )
+                except Exception:
+                    pass
+                return torch.load(
+                    checkpoint_path,
+                    map_location=_checkpoint_map_location(device),
+                    **weights_only,
+                )
+            raise
     except FileNotFoundError:
         try:
             if not (

@@ -6,7 +6,10 @@ optimizers for training.
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-import mir_eval
+try:
+    import mir_eval
+except ModuleNotFoundError:  # optional dependency (metrics only)
+    mir_eval = None
 import numpy as np
 import torch
 from pytorch_lightning import LightningModule
@@ -322,6 +325,8 @@ class Metrics:
         self.min_beat_time = eval_trim_beats
 
     def __call__(self, truth, preds, step) -> Any:
+        if mir_eval is None:
+            return {}
         truth = mir_eval.beat.trim_beats(truth, min_beat_time=self.min_beat_time)
         preds = mir_eval.beat.trim_beats(preds, min_beat_time=self.min_beat_time)
         if (
