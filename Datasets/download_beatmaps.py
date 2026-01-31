@@ -57,7 +57,7 @@ class OsuAPIClient:
         token_data = response.json()
         self.access_token = token_data["access_token"]
         self.token_expires = time.time() + token_data["expires_in"] - 60
-        print("✓ Authenticated with osu! API")
+        print("[OK] Authenticated with osu! API")
         
     def _ensure_authenticated(self):
         """Ensure we have a valid token."""
@@ -97,7 +97,7 @@ def download_beatmapset(beatmapset_id: int, output_dir: Path, session: requests.
     output_path = output_dir / f"{beatmapset_id}.osz"
     
     if output_path.exists():
-        print(f"  ⏭ {beatmapset_id}.osz already exists, skipping")
+        print(f"  [SKIP] {beatmapset_id}.osz already exists")
         return output_path
     
     # Try catboy.best mirror (commonly used for bulk downloads)
@@ -109,10 +109,10 @@ def download_beatmapset(beatmapset_id: int, output_dir: Path, session: requests.
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"  ✓ Downloaded {beatmapset_id}.osz")
+            print(f"  [OK] Downloaded {beatmapset_id}.osz")
             return output_path
     except Exception as e:
-        print(f"  ⚠ Mirror failed for {beatmapset_id}: {e}")
+        print(f"  [WARN] Mirror failed for {beatmapset_id}: {e}")
     
     # Try chimu.moe mirror as fallback
     chimu_url = f"https://api.chimu.moe/v1/download/{beatmapset_id}"
@@ -122,12 +122,12 @@ def download_beatmapset(beatmapset_id: int, output_dir: Path, session: requests.
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"  ✓ Downloaded {beatmapset_id}.osz (chimu)")
+            print(f"  [OK] Downloaded {beatmapset_id}.osz (chimu)")
             return output_path
     except Exception as e:
-        print(f"  ⚠ Chimu mirror failed for {beatmapset_id}: {e}")
+        print(f"  [WARN] Chimu mirror failed for {beatmapset_id}: {e}")
     
-    print(f"  ✗ Failed to download {beatmapset_id}")
+    print(f"  [FAIL] Failed to download {beatmapset_id}")
     return None
 
 
@@ -140,7 +140,7 @@ def extract_audio_from_osz(osz_path: Path, output_dir: Path, expected_md5: str =
                           if f.lower().endswith(('.mp3', '.ogg', '.wav'))]
             
             if not audio_files:
-                print(f"  ⚠ No audio found in {osz_path.name}")
+                print(f"  [WARN] No audio found in {osz_path.name}")
                 return None
             
             # Usually there's one main audio file, or pick the largest
@@ -156,19 +156,19 @@ def extract_audio_from_osz(osz_path: Path, output_dir: Path, expected_md5: str =
                     output_path = output_dir / f"{md5}{Path(audio_file).suffix}"
                     with open(output_path, 'wb') as f:
                         f.write(audio_data)
-                    print(f"  ✓ Extracted {audio_file} → {output_path.name}")
+                    print(f"  [OK] Extracted {audio_file} -> {output_path.name}")
                     return output_path
                 elif not expected_md5:
                     # Just extract the first audio file
                     output_path = output_dir / f"{md5}{Path(audio_file).suffix}"
                     with open(output_path, 'wb') as f:
                         f.write(audio_data)
-                    print(f"  ✓ Extracted {audio_file} → {output_path.name}")
+                    print(f"  [OK] Extracted {audio_file} -> {output_path.name}")
                     return output_path
                     
             # If expected MD5 not found, extract all and warn
             if expected_md5:
-                print(f"  ⚠ Expected MD5 {expected_md5} not found in {osz_path.name}")
+                print(f"  [WARN] Expected MD5 {expected_md5} not found in {osz_path.name}")
                 # Extract first one anyway
                 audio_file = audio_files[0]
                 audio_data = zf.read(audio_file)
@@ -179,10 +179,10 @@ def extract_audio_from_osz(osz_path: Path, output_dir: Path, expected_md5: str =
                 return output_path
                 
     except zipfile.BadZipFile:
-        print(f"  ✗ Corrupt archive: {osz_path.name}")
+        print(f"  [FAIL] Corrupt archive: {osz_path.name}")
         return None
     except Exception as e:
-        print(f"  ✗ Error extracting {osz_path.name}: {e}")
+        print(f"  [FAIL] Error extracting {osz_path.name}: {e}")
         return None
 
 
@@ -245,7 +245,7 @@ def main():
     osz_dir.mkdir(exist_ok=True)
     
     # Get beatmapsets to download
-    print(f"📂 Scanning annotations in {annotations_dir}")
+    print(f"[INFO] Scanning annotations in {annotations_dir}")
     beatmapsets = get_unique_beatmapsets(annotations_dir)
     print(f"   Found {len(beatmapsets)} unique beatmapsets")
     
@@ -261,7 +261,7 @@ def main():
             api_client = OsuAPIClient(args.client_id, args.client_secret)
             api_client.authenticate()
         except Exception as e:
-            print(f"⚠ API authentication failed: {e}")
+            print(f"[WARN] API authentication failed: {e}")
             print("  Continuing without API (using mirrors only)")
     
     # Download and extract
@@ -294,9 +294,9 @@ def main():
         time.sleep(0.5)
     
     print(f"\n{'='*50}")
-    print(f"✓ Successfully extracted: {successful}")
-    print(f"✗ Failed: {failed}")
-    print(f"📁 Audio files saved to: {output_dir}")
+    print(f"[OK] Successfully extracted: {successful}")
+    print(f"[FAIL] Failed: {failed}")
+    print(f"[INFO] Audio files saved to: {output_dir}")
 
 
 if __name__ == "__main__":
