@@ -40,6 +40,12 @@
 - Prefer running Python scripts from repo root; use absolute paths in scripts only when required.
 - For AMD GPU training, use WSL2 workflows in `training_site/` (see `docs/TRAINING_SITE.md`).
 
+## Project anchor: The Four Foundations
+- **The Ear (Audio Analysis):** timing, rhythm, phrasing, emphasis, and when not to place notes.
+- **The Eye (Review + Taste):** critique/justify style choices; match patterns to mood/intent.
+- **The Brain (Contextual Generation):** long-range coherence across sections, motifs, density ramps.
+- **The Hands (Playability + Iteration):** ergonomics, readability, difficulty fairness, playtest feedback loop.
+
 ## Do not
 - Run long training jobs on Windows unless explicitly requested.
 - Add generated dataset or model outputs to git.
