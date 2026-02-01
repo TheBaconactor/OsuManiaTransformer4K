@@ -9,7 +9,7 @@ This keeps the Windows repo focused on inference + tooling, while training happe
 Run the one-shot driver script (sync → setup → train → export → copy back):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File training_site\run_wsl_ear_finetune.ps1
+powershell -ExecutionPolicy Bypass -File training\wsl\run_wsl_ear_finetune.ps1
 ```
 
 Tuning knobs:
@@ -19,7 +19,7 @@ Tuning knobs:
 
 ## Dataset gathering
 
-See `docs/DATASETS.md` for the supported dataset flows (osu! exports vs API search + mirror download) and how to build `Datasets2/`.
+See `docs/DATASETS.md` for the supported dataset flows (osu! exports vs API search + mirror download) and how to build `data/datasets2/`.
 
 ## Recommended layout
 
@@ -53,8 +53,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 pip install -U pip
-pip install -r training_site/requirements-train.txt
-pip install -e Modules/beat_this
+pip install -r training/wsl/requirements-train.txt
+pip install -e modules/beat_this
 
 # Choose ONE:
 # - ROCm (WSL2 + AMD GPU): huge download, only works if ROCm kernel driver is available
@@ -79,36 +79,36 @@ If you see `ROCk module is NOT loaded` / `amdgpu not found in modules`, then ROC
 - `apt-get update` fails with an NVIDIA CUDA repo signature error:
   - Disable the offending file under `/etc/apt/sources.list.d/` (our PowerShell runner does this automatically).
 - Quick diagnostic script (run inside WSL2):
-  - `./training_site/diagnose_rocm_wsl.sh`
+  - `./training/wsl/diagnose_rocm_wsl.sh`
 
 ## Fine-tune “The Ear” (osu-supervised, no human feedback)
 
 From the training repo:
 ```bash
-./training_site/run_ear_finetune.sh
+./training/wsl/run_ear_finetune.sh
 ```
 
 What it does:
-- builds a Beat This-style dataset from `Datasets2/`
+- builds a Beat This-style dataset from `data/datasets2/`
 - fine-tunes Beat This on those beat labels
 - exports an ONNX model for DirectML inference
 
 ## Export back to Windows (for inference)
 
 The script writes:
-- `Modules/beat_this/beat_this/onnx_models/osu_ear_finetune.onnx`
+- `modules/beat_this/beat_this/onnx_models/osu_ear_finetune.onnx`
 
 Copy it to the Windows inference repo:
 ```bash
-cp Modules/beat_this/beat_this/onnx_models/osu_ear_finetune.onnx \
-  /mnt/c/Users/troll/Desktop/OsuManiaTransformer4K/Modules/beat_this/beat_this/onnx_models/
+cp modules/beat_this/beat_this/onnx_models/osu_ear_finetune.onnx \
+  /mnt/c/Users/troll/Desktop/OsuManiaTransformer4K/modules/beat_this/beat_this/onnx_models/
 ```
 
 ## Using the exported model on Windows (DirectML)
 
 From the Windows inference repo:
 ```powershell
-python Modules/beat_this/beat_to_osu.py Datasets2/audio/-1_0_terceS_Hard.mp3 `
+python modules/beat_this/beat_to_osu.py data/datasets2/audio/-1_0_terceS_Hard.mp3 `
   --device dml `
   --checkpoint osu_ear_finetune `
   --timing-profile live `
@@ -116,5 +116,5 @@ python Modules/beat_this/beat_to_osu.py Datasets2/audio/-1_0_terceS_Hard.mp3 `
 ```
 
 Notes:
-- `--checkpoint osu_ear_finetune` maps to `Modules/beat_this/beat_this/onnx_models/osu_ear_finetune.onnx`.
+- `--checkpoint osu_ear_finetune` maps to `modules/beat_this/beat_this/onnx_models/osu_ear_finetune.onnx`.
 - If you don’t use `--device dml`, PyTorch will be used (CPU unless you have CUDA).

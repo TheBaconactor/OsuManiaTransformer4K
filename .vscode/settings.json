@@ -11,20 +11,20 @@
 
     "reports": true,
 
-    "Datasets/annotations": true,
-    "Datasets/audio": true,
-    "Datasets/osz_cache": true,
-    "Datasets/.env": true,
+    "data/osu2mir_audio/annotations": true,
+    "data/osu2mir_audio/audio": true,
+    "data/osu2mir_audio/osz_cache": true,
+    "data/osu2mir_audio/.env": true,
 
-    "Datasets2/annotations": true,
-    "Datasets2/audio": true,
-    "Datasets2/timing_points": true,
-    "Datasets2/osz_cache": true,
-    "Datasets2/metadata": true,
+    "data/datasets2/annotations": true,
+    "data/datasets2/audio": true,
+    "data/datasets2/timing_points": true,
+    "data/datasets2/osz_cache": true,
+    "data/datasets2/metadata": true,
 
-    "Modules/beat_this/data": true,
-    "Modules/beat_this/checkpoints": true,
-    "Modules/beat_this/beat_this/onnx_models": true
+    "modules/beat_this/data": true,
+    "modules/beat_this/checkpoints": true,
+    "modules/beat_this/beat_this/onnx_models": true
   },
   "search.exclude": {
     "**/__pycache__": true,
@@ -35,12 +35,12 @@
     "**/.venv": true,
     "reports/**": true,
 
-    "Datasets/**": true,
-    "Datasets2/**": true,
+    "data/osu2mir_audio/**": true,
+    "data/datasets2/**": true,
 
-    "Modules/beat_this/data/**": true,
-    "Modules/beat_this/checkpoints/**": true,
-    "Modules/beat_this/beat_this/onnx_models/**": true
+    "modules/beat_this/data/**": true,
+    "modules/beat_this/checkpoints/**": true,
+    "modules/beat_this/beat_this/onnx_models/**": true
   },
   "files.watcherExclude": {
     "**/__pycache__/**": true,
@@ -49,11 +49,10 @@
     "**/.ruff_cache/**": true,
     "**/.venv/**": true,
     "reports/**": true,
-    "Datasets/**": true,
-    "Datasets2/**": true,
-    "Modules/beat_this/data/**": true,
-    "Modules/beat_this/checkpoints/**": true,
-    "Modules/beat_this/beat_this/onnx_models/**": true
+    "data/osu2mir_audio/**": true,
+    "data/datasets2/**": true,
+    "modules/beat_this/data/**": true,
+    "modules/beat_this/checkpoints/**": true,
+    "modules/beat_this/beat_this/onnx_models/**": true
   }
 }
-

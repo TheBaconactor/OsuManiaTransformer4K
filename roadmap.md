@@ -28,12 +28,12 @@ We separate the problem into two distinct tasks handled by specialized AI compon
 #### Stage 1.1: Ear Calibration (osu-supervised, no human feedback)
 Goal: fine-tune timing perception using *existing ranked maps* as supervision (their redlines define the beat grid).
 
-- Build a Beat This training dataset from `Datasets2/`:
-    - `python scripts/build_beat_this_osu_dataset.py --val-artist Rousseau`
+- Build a Beat This training dataset from `data/datasets2/`:
+    - `python training/scripts/build_beat_this_osu_dataset.py --val-artist Rousseau`
 - Fine-tune from a pretrained Beat This checkpoint:
-    - `python scripts/finetune_beat_this_osu.py --init-checkpoint final0 --tune heads`
+    - `python training/scripts/finetune_beat_this_osu.py --init-checkpoint final0 --tune heads`
 - Use the resulting `.ckpt` during timing inference:
-    - `python Modules/beat_this/beat_to_osu.py <audio> --checkpoint <path_to_ckpt> --timing-profile live -o out.timing.txt`
+    - `python modules/beat_this/beat_to_osu.py <audio> --checkpoint <path_to_ckpt> --timing-profile live -o out.timing.txt`
 
 ### **Stage 2: The Brain (Mapping & Patterns)**
 -   **Goal:** Place 4K HitObjects (Notes, Sliders, Rice) onto the timing grid.
@@ -56,7 +56,7 @@ Goal: fine-tune timing perception using *existing ranked maps* as supervision (t
 ## 3. Development Plan (The Next Steps)
 
 ### **Phase A: Data Prep (Timing Injection)**
-1.  [ ] **Batch Process Dataset 2:** Run `beat_to_osu.py` on all 6 songs in `Datasets2/`.
+1.  [ ] **Batch Process Dataset 2:** Run `beat_to_osu.py` on all 6 songs in `data/datasets2/`.
 2.  [ ] **Grid Alignment:** Create a training script that "snaps" the human HitObjects to our AI-generated Timing Points. This ensures the model learns to place notes *relative to the AI's perceived beat*.
 
 ### **Phase B: The Mapping Model (Architecture)**
