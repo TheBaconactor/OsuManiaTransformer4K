@@ -17,6 +17,10 @@ Tuning knobs:
 - `-Epochs`, `-BatchSize`, `-TrainLength` control training speed/quality.
 - Output ONNX name: `-OnnxName osu_ear_finetune` (default).
 
+## Dataset gathering
+
+See `docs/DATASETS.md` for the supported dataset flows (osu! exports vs API search + mirror download) and how to build `Datasets2/`.
+
 ## Recommended layout
 
 - **Inference repo (Windows):** `C:\Users\troll\Desktop\OsuManiaTransformer4K`
