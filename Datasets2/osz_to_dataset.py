@@ -173,6 +173,7 @@ def process_osz(osz_path: Path, output_dir: Path, overwrite: bool = False) -> Op
             
             # Process each difficulty
             processed_count = 0
+            already_exists_count = 0
             song_metadata = None
             
             for osu_file, parsed, audio_name in difficulties:
@@ -202,8 +203,15 @@ def process_osz(osz_path: Path, output_dir: Path, overwrite: bool = False) -> Op
                 audio_out = output_dir / 'audio' / f"{song_id}.mp3"
                 annotation_out = output_dir / 'annotations' / f"{song_id}.json"
                 
-                if audio_out.exists() and not overwrite:
+                if audio_out.exists() and annotation_out.exists() and not overwrite:
                     print(f"  [SKIP] {song_id} already exists")
+                    already_exists_count += 1
+                    if song_metadata is None:
+                        song_metadata = {
+                            'title': parsed['metadata'].get('Title', 'Unknown'),
+                            'artist': parsed['metadata'].get('Artist', 'Unknown'),
+                            'beatmap_set_id': beatmap_set_id
+                        }
                     continue
                 
                 # Extract audio (only once per song)
@@ -244,11 +252,14 @@ def process_osz(osz_path: Path, output_dir: Path, overwrite: bool = False) -> Op
                         'beatmap_set_id': beatmap_set_id
                     }
             
-            if processed_count == 0:
+            if processed_count == 0 and already_exists_count == 0:
                 print(f"  [WARN] No 4K Mania difficulties found")
                 return None
             
-            print(f"  [DONE] Processed {processed_count} difficulties")
+            if processed_count == 0 and already_exists_count > 0:
+                print(f"  [DONE] All {already_exists_count} difficulties already extracted")
+            else:
+                print(f"  [DONE] Processed {processed_count} difficulties")
             return song_metadata
             
     except zipfile.BadZipFile:
