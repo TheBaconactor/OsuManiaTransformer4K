@@ -32,6 +32,24 @@ Why: training inside `/home/...` is much faster than training on `/mnt/c/...`.
 
 If you prefer manual setup (instead of the PowerShell script), do:
 
+### ROCm prerequisites (AMD on WSL2)
+
+ROCm-on-WSL requires **two pieces**:
+
+1) A **Windows AMD driver that enables GPU compute for WSL2** (Adrenalin Edition for WSL2)
+2) The **ROCm user-space stack inside the WSL distro**
+
+If your diagnostics show `/dev/dxg` exists but `/dev/kfd` is missing and `rocminfo` prints `ROCk module is NOT loaded`, then WSL can “see” the GPU (DXG) but **ROCm cannot use it yet**.
+
+Run the quick diagnostic (inside WSL):
+- `./training/wsl/diagnose_rocm_wsl.sh`
+
+Then follow AMD’s ROCm-on-WSL setup instructions for your driver + distro.
+
+References:
+- ROCm on Radeon on WSL install guide: https://rocm.docs.amd.com/projects/radeon/en/latest/docs/install/wsl/install-radeon.html
+- Adrenalin Edition for WSL2 release notes: https://www.amd.com/en/resources/support-articles/release-notes/rn-rad-wsl.html
+
 1) Sync the repo into WSL2 (preserves local/uncommitted changes better than `git clone`):
 ```bash
 mkdir -p ~/repos/OsuManiaTransformer4K-train
@@ -42,7 +60,7 @@ cd ~/repos/OsuManiaTransformer4K-train
 2) Install system deps (run as root if your WSL user needs a sudo password):
 ```bash
 apt-get update -y
-apt-get install -y ffmpeg git python3-venv build-essential rocminfo rocm-smi
+apt-get install -y ffmpeg git python3-venv build-essential
 ```
 
 3) Create a venv and install deps.
