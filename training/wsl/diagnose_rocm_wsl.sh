@@ -13,6 +13,10 @@ ls -l /dev/dri/renderD* 2>/dev/null || true
 if [[ ! -e /dev/kfd ]]; then
   echo "[WARN] /dev/kfd is missing -> ROCm/HIP cannot use the GPU inside WSL on this machine."
   echo "[WARN] This usually means ROCm-on-WSL is not enabled/supported by the current Windows GPU driver or GPU model."
+  if [[ -e /dev/dxg ]]; then
+    echo "[HINT] /dev/dxg exists, so GPU-PV is working, but AMD ROCm still needs the WSL2-enabled AMD driver on Windows."
+    echo "[HINT] Install the latest 'AMD Software: Adrenalin Edition for WSL 2' driver (not the standard Adrenalin package), then reboot."
+  fi
 fi
 
 echo "== Kernel modules (amdgpu/kfd/dxg) =="

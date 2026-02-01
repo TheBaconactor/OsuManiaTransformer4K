@@ -741,10 +741,15 @@ def _viterbi_beats_from_prob(
             end_frame = int(t - 1)
 
     # Viterbi DP: dp[frame, d] where d in [d_min, d_max].
+    #
+    # Important: we allow small timing jitter by permitting the previous beat
+    # to land within a window around (frame - d). Without this, the DP can fail
+    # completely if peaks are not spaced at exactly d frames.
     d_vals = np.arange(d_min, d_max + 1, dtype=np.int64)
     d_count = int(d_vals.size)
     dp = np.full((t, d_count), np.inf, dtype=np.float64)
     back_d = np.full((t, d_count), -1, dtype=np.int16)
+    back_frame = np.full((t, d_count), -1, dtype=np.int32)
 
     log_d = np.log(d_vals.astype(np.float64))
     log_d0 = float(np.log(float(d0)))
@@ -753,25 +758,47 @@ def _viterbi_beats_from_prob(
     start_cost = -np.log(p[start_frame])
     dp[start_frame, :] = start_cost
 
+    jitter_w = int(max(1, peak_width_frames))
+    jitter_penalty = 0.25  # ms-scale bias; just to prefer closer matches
+
     for frame in range(start_frame + 1, t):
         if not bool(peak_mask[frame]):
             continue
         emit = -np.log(p[frame])
         for di, d in enumerate(d_vals):
-            prev_frame = frame - int(d)
-            if prev_frame < start_frame:
+            expected_prev = frame - int(d)
+            if expected_prev < start_frame:
                 continue
-            prev_costs = dp[prev_frame, :]
-            if not np.isfinite(prev_costs).any():
+
+            best_prev_cost = float("inf")
+            best_prev_di = -1
+            best_prev_frame = -1
+
+            lo = max(start_frame, expected_prev - jitter_w)
+            hi = min(t - 1, expected_prev + jitter_w)
+            for pf in range(lo, hi + 1):
+                prev_costs = dp[pf, :]
+                if not np.isfinite(prev_costs).any():
+                    continue
+
+                # Penalize log-tempo changes.
+                trans = float(transition_lambda) * (log_d[di] - log_d) ** 2
+                prior = float(tempo_prior_lambda) * (log_d[di] - log_d0) ** 2
+                total = prev_costs + trans + prior
+                prev_di = int(np.argmin(total))
+                cost = float(total[prev_di]) + float(jitter_penalty) * float(abs(pf - expected_prev))
+                if cost < best_prev_cost:
+                    best_prev_cost = cost
+                    best_prev_di = prev_di
+                    best_prev_frame = pf
+
+            if best_prev_di < 0:
                 continue
+
             # Penalize log-tempo changes.
-            trans = float(transition_lambda) * (log_d[di] - log_d) ** 2
-            prior = float(tempo_prior_lambda) * (log_d[di] - log_d0) ** 2
-            total = prev_costs + trans + prior
-            best_prev = int(np.argmin(total))
-            best_cost = float(total[best_prev])
-            dp[frame, di] = emit + best_cost
-            back_d[frame, di] = np.int16(best_prev)
+            dp[frame, di] = emit + best_prev_cost
+            back_d[frame, di] = np.int16(best_prev_di)
+            back_frame[frame, di] = np.int32(best_prev_frame)
 
     # Pick best end state near end_frame (allow small wiggle).
     end_search = np.arange(max(start_frame + 1, end_frame - d_max), min(t, end_frame + d_max + 1))
@@ -799,9 +826,8 @@ def _viterbi_beats_from_prob(
     frame, di = best_end
     while frame >= start_frame and di >= 0:
         beats.append(int(frame))
-        d = int(d_vals[di])
-        prev_frame = frame - d
         prev_di = int(back_d[frame, di])
+        prev_frame = int(back_frame[frame, di])
         if prev_frame < start_frame or prev_di < 0:
             break
         frame, di = prev_frame, prev_di
@@ -1275,37 +1301,24 @@ def get_frames_and_beats(
             did_refine = True
         beat_time = beat_frames_f / 50.0
         downbeat_time = downbeat_frames.astype(np.float64) / 50.0
+        if len(beat_time) == 0:
+            print(
+                "[WARN] Viterbi postprocessing produced 0 beats; falling back to minimal postprocessing.",
+                file=sys.stderr,
+            )
+            post = Postprocessor(type="minimal", fps=50)
+            beat_time, downbeat_time = post(beat_logits_t, downbeat_logits_t)
     else:
         try:
             post = Postprocessor(type=postprocess, fps=50)
         except ModuleNotFoundError as e:
             if postprocess == "dbn" and e.name == "madmom":
                 print(
-                    "[WARN] postprocess=dbn requested but 'madmom' is not installed; falling back to viterbi.",
+                    "[WARN] postprocess=dbn requested but 'madmom' is not installed; falling back to minimal.",
                     file=sys.stderr,
                 )
-                beat_prob = _sigmoid(beat_logits_t.detach().cpu().numpy().reshape(-1))
-                downbeat_prob = _sigmoid(downbeat_logits_t.detach().cpu().numpy().reshape(-1))
-                beat_frames = _viterbi_beats_from_prob(
-                    beat_prob=beat_prob,
-                    fps=50,
-                    min_bpm=float(viterbi_min_bpm),
-                    max_bpm=float(viterbi_max_bpm),
-                    transition_lambda=float(viterbi_transition_lambda),
-                    tempo_prior_lambda=float(viterbi_tempo_prior_lambda),
-                    peak_threshold=float(viterbi_peak_threshold),
-                )
-                downbeat_frames = _downbeats_from_beats_and_logits(
-                    beat_frames=beat_frames,
-                    downbeat_prob=downbeat_prob,
-                    meter=int(meter_for_downbeats),
-                )
-                beat_frames_f = beat_frames.astype(np.float64)
-                if refine:
-                    beat_frames_f = _quadratic_refine_frames(beat_prob, beat_frames)
-                    did_refine = True
-                beat_time = beat_frames_f / 50.0
-                downbeat_time = downbeat_frames.astype(np.float64) / 50.0
+                post = Postprocessor(type="minimal", fps=50)
+                beat_time, downbeat_time = post(beat_logits_t, downbeat_logits_t)
             else:
                 raise
         else:
@@ -1650,7 +1663,7 @@ def main():
         epilog=(
             "Timing profiles (recommended):\n"
             "  stable: metronomic / produced music (minimal redlines)\n"
-            "  live:   live / rubato recordings (adds frequent resync redlines)\n"
+            "  live:   live / rubato recordings (adds frequent resync redlines; mapper heuristic: ~every bar/half-measure)\n"
             "  auto:   decide per-audio (gridfit vs resync)\n\n"
             "Examples:\n"
             "  python beat_to_osu.py song.mp3 -o timing_points.txt\n"

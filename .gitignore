@@ -38,6 +38,7 @@ osu2mir/osu2beat2025_metered_beats.zip
 osu2mir/421_lbd.pdf
 
 reports/
+lightning_logs/
 
 # Large model/test assets (download/build instead of committing)
 Modules/beat_this/beat_this/onnx_models/*.onnx
@@ -48,6 +49,7 @@ data/osu2mir_audio/audio/
 data/osu2mir_audio/annotations/
 data/osu2mir_audio/osz_cache/
 data/osu2mir_audio/beatmapset_ids.txt
+data/osu2mir_audio/beatmapset_ids*.txt
 data/osu2mir_audio/.env
 
 data/datasets2/audio/
@@ -55,6 +57,13 @@ data/datasets2/annotations/
 data/datasets2/timing_points/
 data/datasets2/osz_cache/
 data/datasets2/metadata/
+
+# Dataset2 variants (e.g., data/datasets2_live_sample)
+data/datasets2*/audio/
+data/datasets2*/annotations/
+data/datasets2*/timing_points/
+data/datasets2*/osz_cache/
+data/datasets2*/metadata/
 
 data/osu2mir/audio/
 data/osu2mir/osz_cache/

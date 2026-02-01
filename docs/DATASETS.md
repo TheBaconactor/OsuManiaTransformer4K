@@ -5,6 +5,8 @@ This repo supports two ways to build training/eval data:
 1) **Local osu! exports** (`.osz` from the osu! client) → `data/datasets2/` (recommended)
 2) **API search → ID list → mirror download** (`.osz`) → `data/datasets2/` (automated, but depends on mirrors)
 
+If you want a **small, high-quality starter set** (to validate the finetune pipeline before scaling up), use the bootstrap task below.
+
 All downloaded/processed datasets are **gitignored** (do not commit audio, `.osz`, or generated annotations).
 
 ## 0) Create a Python env (Windows)
@@ -45,6 +47,28 @@ This uses the official v2 search endpoint to build `data/osu2mir_audio/beatmapse
 Notes:
 - This step uses your creds to obtain an access token, then performs API search requests.
 - The output ID list file is gitignored.
+
+### Small live-ish sample (ranked/qualified 4K mania)
+
+This will:
+- search for a curated set of “live/piano cover” query terms (default list in `tasks.ps1`)
+- restrict to 4K mania (`--mode mania --keys 4`)
+- restrict to high-quality statuses (`ranked`, `qualified`, `loved` by default)
+- download + build a separate dataset folder: `data/datasets2_live_sample/`
+
+```powershell
+.\tasks.ps1 dataset:bootstrap-live-sample -MaxSets 30
+```
+
+Afterwards, build the Beat This training dataset with dedupe enabled (one diff per beatmapset):
+
+```powershell
+python training\scripts\build_beat_this_osu_dataset.py `
+  --datasets2 data\datasets2_live_sample `
+  --dataset-name live_sample `
+  --allow-groups ranked,qualified `
+  --dedupe-by beatmapset
+```
 
 ## 3) Download `.osz` for those IDs (mirror-based)
 

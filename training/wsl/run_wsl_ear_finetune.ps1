@@ -31,6 +31,9 @@ wsl bash -lc "set -euo pipefail; mkdir -p $WslRepo; rsync -a --delete --exclude 
 Write-Host "[2/5] Install system deps in WSL (ffmpeg, python3-venv)"
 wsl -u root bash -lc "set -euo pipefail; if ls /etc/apt/sources.list.d/*nvidia*cuda* >/dev/null 2>&1; then for f in /etc/apt/sources.list.d/*nvidia*cuda*; do mv -f \"\$f\" \"\$f.disabled\"; done; fi; apt-get update -y; apt-get install -y ffmpeg git python3-venv build-essential rocminfo rocm-smi >/dev/null"
 
+Write-Host "[2.5/5] ROCm diagnostics (WSL2)"
+wsl bash -lc "set -euo pipefail; cd $WslRepo; ./training/wsl/diagnose_rocm_wsl.sh || true"
+
 Write-Host "[3/5] Create venv + install Python deps in WSL"
 wsl bash -lc "set -euo pipefail; cd $WslRepo; python3 -m venv .venv; source .venv/bin/activate; python -m pip install -U pip >/dev/null; pip install -r training/wsl/requirements-train.txt >/dev/null; pip install -e modules/beat_this >/dev/null; if rocminfo 2>/dev/null | head -n 2 | grep -qi 'ROCk module is NOT loaded'; then TORCH_INDEX='cpu'; else TORCH_INDEX='rocm6.2'; fi; pip install --index-url https://download.pytorch.org/whl/\$TORCH_INDEX torch torchaudio >/dev/null"
 

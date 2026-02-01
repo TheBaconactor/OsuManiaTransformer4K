@@ -12,6 +12,11 @@ Run the one-shot driver script (sync → setup → train → export → copy bac
 powershell -ExecutionPolicy Bypass -File training\wsl\run_wsl_ear_finetune.ps1
 ```
 
+Legacy path (still supported):
+```powershell
+powershell -ExecutionPolicy Bypass -File training_site\run_wsl_ear_finetune.ps1
+```
+
 Tuning knobs:
 - `-ValArtist` (default: `Rousseau`) chooses which artist is held out as validation.
 - `-Epochs`, `-BatchSize`, `-TrainLength` control training speed/quality.
@@ -43,6 +48,11 @@ If your diagnostics show `/dev/dxg` exists but `/dev/kfd` is missing and `rocmin
 
 Run the quick diagnostic (inside WSL):
 - `./training/wsl/diagnose_rocm_wsl.sh`
+
+If you see `/dev/kfd: missing`, that’s a **Windows driver** issue (not a Linux packages issue):
+- You must install the WSL2-enabled Windows driver: **AMD Software: Adrenalin Edition for WSL 2**.
+- A normal “latest Adrenalin” install often still leaves `/dev/kfd` missing in WSL.
+- Reboot Windows after installing/updating the WSL2 driver, then re-run `./training/wsl/diagnose_rocm_wsl.sh`.
 
 Then follow AMD’s ROCm-on-WSL setup instructions for your driver + distro.
 

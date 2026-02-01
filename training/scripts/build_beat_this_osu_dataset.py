@@ -24,7 +24,7 @@ import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import numpy as np
 import torch
@@ -159,6 +159,60 @@ def _load_datasets2_items(annotations_dir: Path) -> list[Path]:
     return sorted(annotations_dir.glob("*.json"))
 
 
+def _safe_int(value) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _load_song_status_map(datasets2_root: Path) -> dict[str, dict]:
+    """
+    Optional helper: load `<datasets2>/metadata/song_status.json`.
+    Produced by `data/datasets2/clean_and_classify.py`.
+    """
+    path = datasets2_root / "metadata" / "song_status.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _item_group(song_status: dict[str, dict], song_id: str) -> str | None:
+    info = song_status.get(song_id)
+    if not isinstance(info, dict):
+        return None
+    grp = info.get("group")
+    return str(grp) if isinstance(grp, str) else None
+
+
+def _item_status(song_status: dict[str, dict], song_id: str) -> str | None:
+    info = song_status.get(song_id)
+    if not isinstance(info, dict):
+        return None
+    st = info.get("status")
+    return str(st) if isinstance(st, str) else None
+
+
+def _choose_representative(group_items: list[dict]) -> dict:
+    """
+    Pick one representative difficulty among duplicates (same beatmapset/audio).
+    This avoids overweighting a single song via multiple difficulties.
+    """
+
+    def key(it: dict) -> tuple[int, int, str]:
+        return (
+            int(it.get("hit_objects_count") or 0),
+            int(it.get("timing_points_count") or 0),
+            str(it.get("song_id") or ""),
+        )
+
+    return sorted(group_items, key=key, reverse=True)[0]
+
+
 def _split_train_val(
     items: list[dict],
     *,
@@ -241,6 +295,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="If >0, only process the first N annotation files (for quick tests).",
     )
     parser.add_argument(
+        "--allow-groups",
+        type=str,
+        default="",
+        help="Comma-separated groups to keep from <datasets2>/metadata/song_status.json (e.g. ranked,qualified,loved). Empty = keep all.",
+    )
+    parser.add_argument(
+        "--allow-status",
+        type=str,
+        default="",
+        help="Comma-separated raw statuses to keep (e.g. ranked,qualified,loved). Empty = keep all.",
+    )
+    parser.add_argument(
+        "--dedupe-by",
+        type=str,
+        default="none",
+        choices=["none", "beatmapset", "audio"],
+        help="Prevent duplicates by keeping only one difficulty per beatmapset or per audio file (default: %(default)s).",
+    )
+    parser.add_argument(
         "--val-artist",
         type=str,
         default="",
@@ -284,14 +357,65 @@ def main(argv: Iterable[str] | None = None) -> int:
         audio_path = audio_dir / audio_file
         if not audio_path.exists():
             continue
+        timing_points = data.get("timing_points", [])
         items.append(
             {
                 "song_id": song_id,
                 "audio_path": audio_path,
-                "timing_points": data.get("timing_points", []),
+                "audio_file": audio_file,
+                "timing_points": timing_points,
+                "timing_points_count": len(timing_points) if isinstance(timing_points, list) else 0,
                 "artist": data.get("artist", ""),
+                "beatmap_set_id": _safe_int(data.get("beatmap_set_id")),
+                "beatmap_id": _safe_int(data.get("beatmap_id")),
+                "hit_objects_count": len(data.get("hit_objects", []) or []),
             }
         )
+
+    # Optional: filter using dataset classification output to reduce poisoned labels.
+    song_status = _load_song_status_map(datasets2)
+    allow_groups = {s.strip().lower() for s in str(args.allow_groups).split(",") if s.strip()}
+    allow_status = {s.strip().lower() for s in str(args.allow_status).split(",") if s.strip()}
+    if allow_groups or allow_status:
+        kept: list[dict] = []
+        dropped = 0
+        for it in items:
+            sid = str(it.get("song_id") or "")
+            grp = (_item_group(song_status, sid) or "").strip().lower()
+            st = (_item_status(song_status, sid) or "").strip().lower()
+            if allow_groups and grp and grp not in allow_groups:
+                dropped += 1
+                continue
+            if allow_status and st and st not in allow_status:
+                dropped += 1
+                continue
+            kept.append(it)
+        items = kept
+        if dropped:
+            print(f"[INFO] Filtered out {dropped} items by status/group.")
+
+    # Optional: de-duplicate by beatmapset_id or audio_file.
+    dedupe_by: Literal["none", "beatmapset", "audio"] = str(args.dedupe_by)
+    if dedupe_by != "none":
+        buckets: dict[str, list[dict]] = {}
+        for it in items:
+            if dedupe_by == "beatmapset":
+                bms_id = it.get("beatmap_set_id")
+                key = f"bms:{int(bms_id)}" if isinstance(bms_id, int) and bms_id > 0 else f"unknown:{it['song_id']}"
+            else:
+                af = it.get("audio_file")
+                key = f"audio:{af}" if isinstance(af, str) and af else f"unknown:{it['song_id']}"
+            buckets.setdefault(key, []).append(it)
+
+        deduped: list[dict] = []
+        for group_items in buckets.values():
+            if len(group_items) == 1:
+                deduped.append(group_items[0])
+            else:
+                deduped.append(_choose_representative(group_items))
+        if len(deduped) != len(items):
+            print(f"[INFO] Dedupe ({dedupe_by}): {len(items)} -> {len(deduped)}")
+        items = sorted(deduped, key=lambda it: str(it.get("song_id") or ""))
 
     if not items:
         print("[ERROR] No valid items found in data/datasets2.", file=sys.stderr)
