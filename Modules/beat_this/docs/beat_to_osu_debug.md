@@ -7,7 +7,7 @@ This repo’s `Modules/beat_this/beat_to_osu.py` can optionally dump raw model o
 To avoid juggling lots of low-level flags, use `--timing-profile`:
 
 - `stable` (default): metronomic / produced music (minimal redlines)
-- `live`: live / rubato recordings (adds frequent resync redlines)
+- `live`: live / rubato recordings (adds frequent resync redlines). Mapper heuristic: consider placing redlines roughly every **bar line** (or even every **half-measure**) to keep long recordings in sync without over-jittering.
 - `auto`: decide per-audio (gridfit vs resync)
 
 ## Debug bundle
