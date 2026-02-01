@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 env/
+.env
+Datasets/.env
 
 # OS / editor
 .DS_Store

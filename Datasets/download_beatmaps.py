@@ -29,6 +29,36 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+def _strip_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and ((value[0] == value[-1]) and value[0] in ("'", '"')):
+        return value[1:-1]
+    return value
+
+
+def load_env_file(path: Path) -> dict:
+    """
+    Minimal .env loader (KEY=VALUE).
+    - Ignores blank lines and lines starting with '#'
+    - Does not support multiline values
+    """
+    out = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = _strip_quotes(v)
+        if k:
+            out[k] = v
+    return out
+
+
 class OsuAPIClient:
     """osu! API v2 client for downloading beatmaps."""
     
@@ -213,6 +243,9 @@ def get_unique_beatmapsets(annotations_dir: Path) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Download osu! beatmap audio for Osu2MIR")
+    parser.add_argument("--env-file", type=str,
+                       default=None,
+                       help="Optional path to a .env file (defaults to Datasets/.env if present)")
     parser.add_argument("--client-id", type=str, 
                        default=os.environ.get("OSU_CLIENT_ID"),
                        help="osu! API Client ID")
@@ -234,9 +267,16 @@ def main():
                        help="Limit number of beatmaps to download (for testing)")
     
     args = parser.parse_args()
-    
+
     # Setup paths
     script_dir = Path(__file__).parent
+    default_env_path = script_dir / ".env"
+    env_path = Path(args.env_file) if args.env_file else default_env_path
+    file_env = load_env_file(env_path)
+    # File wins over process env, CLI wins over file.
+    args.client_id = args.client_id or file_env.get("OSU_CLIENT_ID")
+    args.client_secret = args.client_secret or file_env.get("OSU_CLIENT_SECRET")
+
     annotations_dir = script_dir / args.annotations_dir
     output_dir = script_dir / args.output_dir
     osz_dir = script_dir / args.osz_dir
