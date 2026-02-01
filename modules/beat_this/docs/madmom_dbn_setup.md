@@ -5,7 +5,9 @@ Beat This! can optionally run a classic DBN/Viterbi-style beat tracker from `mad
 ## Why this needs a separate setup
 
 - `madmom` is not readily installable on Python 3.11+ on Windows via `pip` (it builds native extensions).
-- On Windows, the most reliable path is a dedicated Conda env with Python 3.10 and installing `madmom` from Git via `pip` (it builds a native wheel).
+- On Windows, the most reliable path is often a dedicated Conda env with Python 3.10 and installing `madmom` from Git via `pip` (it builds native extensions).
+
+Note: on some machines, installing from `git+https://github.com/CPJKU/madmom.git` can also work directly in a repo-local `venv` (Python 3.11+), but it may still require build tooling.
 
 ## Recommended: Conda env (Python 3.10)
 
@@ -40,4 +42,4 @@ python modules/beat_this/beat_to_osu.py data/datasets2/audio/-1_0_terceS_Hard.mp
 
 ## Fallback behavior
 
-If you run `--postprocess dbn` without `madmom` installed, `modules/beat_this/beat_to_osu.py` prints a warning and falls back to `--postprocess viterbi`.
+If you run `--postprocess dbn` without `madmom` installed, `modules/beat_this/beat_to_osu.py` prints a warning and falls back to `--postprocess minimal`.
