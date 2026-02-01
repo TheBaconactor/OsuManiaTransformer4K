@@ -21,10 +21,13 @@ Thumbs.db
 Datasets/audio/
 Datasets/annotations/
 Datasets/osz_cache/
+Datasets/beatmapset_ids.txt
 
 Datasets2/audio/
 Datasets2/annotations/
 Datasets2/timing_points/
+Datasets2/osz_cache/
+Datasets2/metadata/
 
 osu2mir/audio/
 osu2mir/osz_cache/

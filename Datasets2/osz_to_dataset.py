@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Optional
 
 
-# Configuration
-OSZ_INPUT_DIR = Path(r"C:/Users/troll/AppData/Local/osu!/Exports")
-DATASET_OUTPUT_DIR = Path(r"c:/Users/troll/Desktop/OsuManiaTransformer4K/Datasets2")
+# Defaults (override via CLI flags)
+DEFAULT_OSZ_INPUT_DIR = Path(r"C:/Users/troll/AppData/Local/osu!/Exports")
+DEFAULT_DATASET_OUTPUT_DIR = Path(r"c:/Users/troll/Desktop/OsuManiaTransformer4K/Datasets2")
 
 
 def parse_osu_file(content: str) -> dict:
@@ -263,40 +263,45 @@ def main():
     parser = argparse.ArgumentParser(description="Process .osz files into Dataset 2")
     parser.add_argument('--file', type=str, help="Process a single .osz file")
     parser.add_argument('--overwrite', action='store_true', help="Overwrite existing files")
+    parser.add_argument('--input-dir', type=str, default=str(DEFAULT_OSZ_INPUT_DIR), help="Directory containing .osz files")
+    parser.add_argument('--output-dir', type=str, default=str(DEFAULT_DATASET_OUTPUT_DIR), help="Output dataset directory")
     args = parser.parse_args()
+
+    osz_input_dir = Path(args.input_dir)
+    dataset_output_dir = Path(args.output_dir)
     
     # Ensure output directories exist
-    (DATASET_OUTPUT_DIR / 'audio').mkdir(parents=True, exist_ok=True)
-    (DATASET_OUTPUT_DIR / 'annotations').mkdir(parents=True, exist_ok=True)
-    (DATASET_OUTPUT_DIR / 'metadata').mkdir(parents=True, exist_ok=True)
+    (dataset_output_dir / 'audio').mkdir(parents=True, exist_ok=True)
+    (dataset_output_dir / 'annotations').mkdir(parents=True, exist_ok=True)
+    (dataset_output_dir / 'metadata').mkdir(parents=True, exist_ok=True)
     
     if args.file:
         # Process single file
         osz_path = Path(args.file)
         if not osz_path.exists():
-            osz_path = OSZ_INPUT_DIR / args.file
+            osz_path = osz_input_dir / args.file
         if not osz_path.exists():
             print(f"[ERROR] File not found: {args.file}")
             return
-        process_osz(osz_path, DATASET_OUTPUT_DIR, args.overwrite)
+        process_osz(osz_path, dataset_output_dir, args.overwrite)
     else:
         # Process all .osz files in input directory
-        osz_files = list(OSZ_INPUT_DIR.glob('*.osz'))
+        osz_files = list(osz_input_dir.glob('*.osz'))
         
         if not osz_files:
-            print(f"[INFO] No .osz files found in {OSZ_INPUT_DIR}")
+            print(f"[INFO] No .osz files found in {osz_input_dir}")
             return
         
         print(f"[INFO] Found {len(osz_files)} .osz files")
         
         processed = []
         for osz_path in osz_files:
-            result = process_osz(osz_path, DATASET_OUTPUT_DIR, args.overwrite)
+            result = process_osz(osz_path, dataset_output_dir, args.overwrite)
             if result:
                 processed.append(result)
         
         # Write manifest
-        manifest_path = DATASET_OUTPUT_DIR / 'metadata' / 'manifest.json'
+        manifest_path = dataset_output_dir / 'metadata' / 'manifest.json'
         with open(manifest_path, 'w', encoding='utf-8') as f:
             json.dump({
                 'total_songs': len(processed),
@@ -304,7 +309,7 @@ def main():
             }, f, indent=2, ensure_ascii=False)
         
         print(f"\n[SUMMARY] Processed {len(processed)} songs")
-        print(f"[SUMMARY] Output directory: {DATASET_OUTPUT_DIR}")
+        print(f"[SUMMARY] Output directory: {dataset_output_dir}")
 
 
 if __name__ == "__main__":
