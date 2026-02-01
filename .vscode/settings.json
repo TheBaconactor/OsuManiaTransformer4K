@@ -1,0 +1,59 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+
+    ".venv": true,
+    "**/.venv": true,
+
+    "reports": true,
+
+    "Datasets/annotations": true,
+    "Datasets/audio": true,
+    "Datasets/osz_cache": true,
+    "Datasets/.env": true,
+
+    "Datasets2/annotations": true,
+    "Datasets2/audio": true,
+    "Datasets2/timing_points": true,
+    "Datasets2/osz_cache": true,
+    "Datasets2/metadata": true,
+
+    "Modules/beat_this/data": true,
+    "Modules/beat_this/checkpoints": true,
+    "Modules/beat_this/beat_this/onnx_models": true
+  },
+  "search.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+
+    "**/.venv": true,
+    "reports/**": true,
+
+    "Datasets/**": true,
+    "Datasets2/**": true,
+
+    "Modules/beat_this/data/**": true,
+    "Modules/beat_this/checkpoints/**": true,
+    "Modules/beat_this/beat_this/onnx_models/**": true
+  },
+  "files.watcherExclude": {
+    "**/__pycache__/**": true,
+    "**/.pytest_cache/**": true,
+    "**/.mypy_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/.venv/**": true,
+    "reports/**": true,
+    "Datasets/**": true,
+    "Datasets2/**": true,
+    "Modules/beat_this/data/**": true,
+    "Modules/beat_this/checkpoints/**": true,
+    "Modules/beat_this/beat_this/onnx_models/**": true
+  }
+}
+
